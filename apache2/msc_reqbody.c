@@ -428,9 +428,24 @@ apr_status_t modsecurity_request_body_store(modsec_rec *msr,
 }
 
 apr_status_t modsecurity_request_body_to_stream(modsec_rec *msr, const char *buffer, int buflen, char **error_msg) {
+#ifndef MSC_LARGE_STREAM_INPUT
+    char *stream_input_body = NULL;
+    char *data = NULL;
+    int first_pkt = 0;
+#else
     apr_size_t allocate_length = 0;
     char* allocated = NULL;
+#endif
 
+#ifndef MSC_LARGE_STREAM_INPUT
+    if(msr->stream_input_data == NULL)  {
+        msr->stream_input_data = (char *)calloc(sizeof(char), msr->stream_input_length + 1);
+        first_pkt = 1;
+    }
+    else    {
+
+        data = (char *)malloc(msr->stream_input_length + 1 - buflen);
+#else
     if (msr->stream_input_data == NULL)  {
         // Is the request body length known beforehand? (requests that are not Transfer-Encoding: chunked)
         if (msr->request_content_length > 0) {
@@ -441,7 +456,11 @@ apr_status_t modsecurity_request_body_to_stream(modsec_rec *msr, const char *buf
             // We don't know how this request is going to be, so hope for just buflen to begin with (requests that are Transfer-Encoding: chunked)
             allocate_length = buflen;
         }
+#endif
 
+#ifndef MSC_LARGE_STREAM_INPUT
+        if(data == NULL)
+#else
         allocated = (char*) calloc(allocate_length, sizeof(char));
         if (allocated) {
             msr->stream_input_data = allocated;
@@ -452,13 +471,34 @@ apr_status_t modsecurity_request_body_to_stream(modsec_rec *msr, const char *buf
                 msr->mp,
                 "Unable to allocate memory to hold request body on stream. Asked for %" APR_SIZE_T_FMT " bytes.",
                 allocate_length);
+#endif
             return -1;
-        }
+
+#ifndef MSC_LARGE_STREAM_INPUT
+        memset(data, 0, msr->stream_input_length + 1 - buflen);
+        memcpy(data, msr->stream_input_data, msr->stream_input_length - buflen);
+
+        stream_input_body = (char *)realloc(msr->stream_input_data, msr->stream_input_length + 1);
+
+        msr->stream_input_data = (char *)stream_input_body;
     }
+
+    if (msr->stream_input_data == NULL) {
+        if(data)    {
+            free(data);
+            data = NULL;
+#endif
+        }
+#ifndef MSC_LARGE_STREAM_INPUT
+        *error_msg = apr_psprintf(msr->mp, "Unable to allocate memory to hold request body on stream. Asked for %" APR_SIZE_T_FMT " bytes.",
+                msr->stream_input_length + 1);
+        return -1;
+#endif
+    }
+#ifdef MSC_LARGE_STREAM_INPUT
     else {
         // Do we need to expand the space we have previously allocated?
         if ((msr->stream_input_length + buflen) > msr->stream_input_allocated_length) {
-
             // If this becomes a hotspot again, consider increasing by some percent extra each time, for fewer reallocs
             allocate_length = msr->stream_input_length + buflen;
 
@@ -480,10 +520,29 @@ apr_status_t modsecurity_request_body_to_stream(modsec_rec *msr, const char *buf
             }
         }
     }
+#else
+    else {
+        memset(msr->stream_input_data, 0, msr->stream_input_length+1);
+ 
+        if(first_pkt)   {
+            memcpy(msr->stream_input_data, buffer, msr->stream_input_length);
+        } else {
+            memcpy(msr->stream_input_data, data, msr->stream_input_length - buflen);
+            memcpy(msr->stream_input_data+(msr->stream_input_length - buflen), buffer, buflen);
+        }
+    }
+#endif
 
+#ifdef MSC_LARGE_STREAM_INPUT
     // Append buffer to msr->stream_input_data
     memcpy(msr->stream_input_data + msr->stream_input_length, buffer, buflen);
     msr->stream_input_length += buflen;
+#else
+    if(data)    {
+        free(data);
+        data = NULL;
+    }
+#endif
 
     return 1;
 }
